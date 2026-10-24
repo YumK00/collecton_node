@@ -7,7 +7,7 @@
 ## 一、项目简介
 工业现场的传感器数据要进云端，中间隔着一条抗干扰、可多主、带优先级的 CAN 总线。本项目把它拆成三个嵌入式节点：A 节点负责"采"和"报"，B 节点负责"执行"，ESP32-S3 网关负责"转发与上云"。本仓库是其中的采集端：两路 12 位 ADC 由 DMA 循环搬运，采集任务每 100 ms 组一帧 `0x101` 广播出去，心跳任务每 1 s 发一帧 `0x701`；同时它在总线上当"听众"，靠 B 节点和网关的心跳判断谁还活着，并把链路状态画在一块 SSD1306 OLED 上。
 
-现有能力（均为代码中真实存在的功能）：
+现有能力
 
 - **ADC1 双通道扫描 + 连续转换 + DMA 循环**：PA0(IN0)=红外、PA1(IN1)=光敏，CPU 不搬数，任务直接读 `adc_dma_buf[]`。
 - **CAN 2.0A 标准帧 250 kbps**：发送查空闲邮箱，接收走 RX FIFO0 中断 → 队列 → 任务，中断里不解析。
@@ -244,18 +244,3 @@ collecton_node/
 - **根因**：`CAN_Send()` 在 `HAL_CAN_GetTxMailboxesFreeLevel() == 0` 时直接 `return 0` 丢帧，调用方没检查返回值；而 `photoAdcTask`(32) 与 `canHeartTask`(15) 都直接调它，"查空闲邮箱 → 写邮箱"之间没有互斥，高优先级任务可在中间抢占。
 - **定位手法**：统计 `CAN_Send()` 返回值；观察缺口是否只在两帧发送时刻接近时出现。
 - **处理**：把发送收敛到单一任务，或给 `CAN_Send()` 加互斥量（后续阶段）。
-
-## 十、相关仓库与备注
-
-| 仓库 | 地址 | 关系 |
-|---|---|---|
-| control_node | https://github.com/YumK00/control_node | 同一条 CAN 总线上的执行节点 B，收本节点广播的 `0x101`，上报 `0x102`/`0x702` |
-| gateway_node | https://github.com/YumK00/gateway_node | 同一条总线上的 ESP32-S3 网关，把 `0x101` 转成 MQTT 上行；下发的 `0x301`/`0x311` 本节点尚未解析 |
-| v_car | https://github.com/YumK00/v_car | 独立项目：车载域 T-Box 仿真，不与本链路共用 Broker 或协议 |
-| weather_bureau | https://github.com/YumK00/weather_bureau | 独立项目：气象数据开放平台（Linux C++ 后端） |
-
-**空壳与未接入**：① 整文件被注释（不参与编译）—— `adc.c/h`、`i2c.c/h`(MPU6050)、`spi.c/h`(软件 SPI)、`spii.c/h`(SPI1+W25Q64)、`pwm_ic.c/h`(TIM2_CH2 输入捕获测频)、`pwm_oc.c/h`(TIM1_CH1 呼吸灯)、`timer_extern_interrupt.c/h`(TIM2 ETR 计数)、`timer_intern_interrupt.c/h`(TIM2 1 s 中断)，它们与 `adc_dma.c` 存在 PA0/PA1/PA8 引脚重叠，恢复前要先解冲突。② `oneWire.c`/`DHT22.c` 是真代码但**无调用者**，且只有起停 + 5 字节读取，缺 40 bit 解析与校验和；`Delay_us()` 按 72 MHz 标定，实际 36 MHz 会偏慢约一倍。③ `serialSendTask` 的生产者被注释，串口输出与 OLED 数值刷新**实际不工作**，该任务永久阻塞在空队列上，白占 1 KB 栈。
-
-**已知问题**：`Error_Handler()` 先 `__disable_irq()` 再 `HAL_Delay(200)`——HAL 时基是 TIM4 中断，中断一关 `uwTick` 不再增长，`HAL_Delay` 永远等下去，PA8 根本不会翻转，想闪灯报错反而彻底静默；`iic.c` 的 `CPU_FREQ_MHZ 72` 与实际主频不符，软件 I2C 每位实际约 2 µs，OLED 事务耗时翻倍；`OLED_Init()` 注释里的"PB8-SCL PB9-SDA"与实际 PB6/PB7 不符；`MX_GPIO_Init()` 只开 GPIOC/GPIOD/GPIOA 时钟，GPIOB 靠 `LED_Init()`/`Key_Init()`/`MyIIC_Init()` 各自补开，初始化顺序一变 PB 外设就静默失效，且 `GPIOD` 时钟使能后未用。
-
-**后续阶段 / 规划中**：`0x011 ALARM_A` 报警上报（`ALM_SENSOR_FAULT`/`ALM_THRESH_OVER` 已定义未使用）；接收并执行 `0x301 CTRL_MOTOR_A` / `0x311 CTRL_TARGET_A` 并用 `cid` 做幂等；`PROTO_SeqLost()` 丢帧统计与队列 Put 失败计数；`0x000` 急停的实际安全动作（目前只刷 OLED，未停采集、未联动执行器）；UDS 诊断 `0x7E0`/`0x7E8`（协议表标为阶段 2/4）、DHT22 温度接入、SPI Flash 本地缓存。
